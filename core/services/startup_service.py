@@ -4,6 +4,7 @@ from config.paths import (
     OUTPUT_DIR,
     Q_CURRENT_DATABASE_DIR,
     Q_CURRENT_REPORT_DIR,
+    CAN_INTERFACE_LOG_DIR,
 )
 
 
@@ -16,5 +17,6 @@ def ensure_directories():
         CODING_VALUE_REPORT_DIR,
         Q_CURRENT_DATABASE_DIR,
         Q_CURRENT_REPORT_DIR,
+        CAN_INTERFACE_LOG_DIR,
     ):
         folder.mkdir(parents=True, exist_ok=True)

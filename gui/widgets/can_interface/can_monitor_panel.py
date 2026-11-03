@@ -35,13 +35,15 @@ class CanMonitorPanel(QWidget):
         self.btn_clear = ActionButton("Clear", width=55, height=30)
         self.btn_export = ActionButton("Export CSV", width=85, height=30)
         self.btn_blf = ActionButton("Start BLF Log", width=100, height=30)
+        self.btn_logs = ActionButton("Logs", width=55, height=30)
         self.btn_export.setEnabled(False)
         self.btn_blf.setEnabled(False)
         self.btn_export.setToolTip("Export retained frames matching the view filters, not a complete raw log.")
         self.btn_blf.setToolTip("Connect a CAN channel to record raw traffic independently of this view.")
+        self.btn_logs.setToolTip("Open diagnostic anomalies and application logs folder.")
         header.addWidget(self.title, 1)
         header.addWidget(self.status)
-        for button in (self.btn_clear, self.btn_export, self.btn_blf): header.addWidget(button)
+        for button in (self.btn_clear, self.btn_export, self.btn_blf, self.btn_logs): header.addWidget(button)
         filters = QHBoxLayout()
         self.edit_can_id = PrimaryLineEdit("CAN ID filter (HEX)")
         self.cmb_direction = PrimaryComboBox(minimum_height=30)
@@ -60,6 +62,7 @@ class CanMonitorPanel(QWidget):
         layout.addWidget(self.feedback)
         layout.addWidget(self.counters)
         self.btn_clear.clicked.connect(self.clear_display)
+        self.btn_logs.clicked.connect(self._open_logs)
         self.edit_can_id.textChanged.connect(self._render)
         self.cmb_direction.currentTextChanged.connect(self._render)
         self._render()
@@ -149,11 +152,15 @@ class CanMonitorPanel(QWidget):
         self.btn_export.setEnabled(bool(self._buffer))
         self.counters.setText(f"Frames: {self.frames}    Displayed: {self.displayed}    Dropped: {self.dropped}")
 
+    def _open_logs(self):
+        from services.logging_service import open_logs_folder
+        open_logs_folder()
+
     def fn_refresh_theme(self):
         apply_panel_theme(self, "canMonitorPanel")
         self.title.fn_refresh_theme()
         self.table.fn_refresh_theme()
-        for widget in (self.status, self.btn_clear, self.btn_export, self.btn_blf, self.edit_can_id, self.cmb_direction, self.feedback, self.counters):
+        for widget in (self.status, self.btn_clear, self.btn_export, self.btn_blf, self.btn_logs, self.edit_can_id, self.cmb_direction, self.feedback, self.counters):
             widget.fn_refresh_theme()
         from gui.themes.styles.controls.scrollbar_style import fn_apply_scrollbar_style
         fn_apply_scrollbar_style(self.cmb_direction.view())

@@ -42,6 +42,8 @@ def main() -> int:
     global MainWindow
 
     ensure_directories()
+    from services.logging_service import init_logging
+    init_logging()
     ensure_start_menu_shortcut()
    
     app = QApplication(sys.argv)

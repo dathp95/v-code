@@ -52,6 +52,9 @@ class CanDiagnosticSession(QObject):
         self.monitoring_changed.emit(False)
 
     def _capture(self,frame):
+        self._rx_total_count = getattr(self, '_rx_total_count', 0) + 1
+        if self.request is not None and frame.can_id == self.request.rx_id and frame.direction == 'RX':
+            self._rx_target_count = getattr(self, '_rx_target_count', 0) + 1
         if self.capture_sink is not None: self.capture_sink(frame)
         self._frames.append(frame)
 
@@ -69,6 +72,9 @@ class CanDiagnosticSession(QObject):
             self.finished.emit(DiagnosticResult(request,Outcome.CANCELLED,detail='Diagnostic request cancelled before start.'))
             return
         self.request=request
+        self._tx_count = 0
+        self._rx_target_count = 0
+        self._rx_total_count = 0
         if (is_security_seed_payload(request.uds_payload)
                 and getattr(self.service, 'is_auto_request', lambda _: False)(request)):
             session_id = self.service.capture_session_id
@@ -95,6 +101,7 @@ class CanDiagnosticSession(QObject):
             self._finish(DiagnosticResult(request,Outcome.ERROR,detail=message))
 
     def _send(self,can_id,data):
+        self._tx_count = getattr(self, '_tx_count', 0) + 1
         frame=self.service.fn_send_diagnostic_frame(can_id,data)
         self._capture(frame)
 
@@ -264,6 +271,33 @@ class CanDiagnosticSession(QObject):
         self._publish()
 
     def _finish(self,result):
+        tx_count = getattr(self, '_tx_count', 0)
+        rx_target = getattr(self, '_rx_target_count', 0)
+        rx_total = getattr(self, '_rx_total_count', 0)
+        cfg = getattr(self.service.snapshot, 'config', None)
+        telemetry = {
+            'tx_count': tx_count,
+            'rx_target_count': rx_target,
+            'rx_total_count': rx_total,
+            'channel': getattr(cfg, 'channel', 0) if cfg else 0,
+            'bitrate': getattr(cfg, 'bitrate', 500000) if cfg else 500000,
+        }
+
+        # Enrich timeout detail if target ECU was silent
+        if result.outcome == Outcome.TIMEOUT and rx_target == 0 and self.request is not None:
+            if '0 frames received' not in result.detail:
+                from dataclasses import replace
+                hint = f"(0 frames received on 0x{self.request.rx_id:03X}; {rx_total} bus frames observed). Check 10 03 session or power."
+                result = replace(result, detail=f"{result.detail} {hint}")
+
+        try:
+            from services.logging_service import log_diagnostic_transaction, log_diagnostic_failure
+            log_diagnostic_transaction(result)
+            if result.outcome not in (Outcome.PASSED, Outcome.NOT_EVALUATED):
+                log_diagnostic_failure(result, telemetry)
+        except Exception:
+            LOG.exception('Diagnostic logging failed')
+
         completed=getattr(self.service,'fn_diagnostic_completed',None)
         if callable(completed): completed(result)
         self._release()
