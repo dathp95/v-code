@@ -37,6 +37,8 @@ class CanDiagnosticController(QObject):
         self._security_timer.timeout.connect(self._refresh_security_status)
         self._security_timer.start()
         panel.row_send_requested.connect(self.send_row)
+        if hasattr(panel, "sequence_stop_requested"):
+            panel.sequence_stop_requested.connect(self._on_sequence_stopped)
         panel.document_changed.connect(self.invalidate)
         panel.sequence_modified.connect(self.invalidate)
         panel.vehicle_configuration_changed.connect(self._vehicle_configuration_changed)
@@ -218,6 +220,11 @@ class CanDiagnosticController(QObject):
     def _vehicle_configuration_changed(self,*_):
         self.invalidate()
         self._state()
+
+    def _on_sequence_stopped(self):
+        self.auto_security.cancel()
+        if self._active is not None:
+            self.task.cancel_diagnostic()
 
     def send_row(self,key):
         if self._closed or self._preparing or self._active is not None or self.task.diagnostic_busy or self.auto_security.busy:

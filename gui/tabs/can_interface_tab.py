@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QHBoxLayout, QSplitter, QWidget
 
@@ -77,8 +79,32 @@ class CANInterfaceTab(QWidget):
         self.sequence_table.sequence_modified.connect(self._update_current_step)
         self.dll_resource_controller = CanDllResourceController(
             self.sequence_table, self.session_panel.current_test_case, self)
+        self.sequence_table.fn_set_sequences_export_provider(self._get_sequences_to_export)
         self.workspace_controller.restore()
         self.fn_refresh_theme()
+
+    def _get_sequences_to_export(self):
+        checked_paths = self.sequence_list.checked_ids()
+        current_case = self.sequence_table.fn_current_sequence()
+        current_source = str(self.workspace_controller.source.resolve()) if self.workspace_controller.source else None
+
+        if not checked_paths:
+            if current_case:
+                return [(current_case, self.sequence_table.get_export_rows())]
+            return []
+
+        result = []
+        for path in checked_paths:
+            p_res = str(Path(path).resolve()) if path else ""
+            if current_source and p_res == current_source and current_case:
+                result.append((current_case, self.sequence_table.get_export_rows()))
+            else:
+                try:
+                    case = self.workspace_controller._case_for_source(path)
+                    result.append((case, None))
+                except Exception:
+                    pass
+        return result
 
     def _on_sequence_selected(self, test_case):
         self.sequence_table.fn_load_sequence(test_case)

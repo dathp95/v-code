@@ -8,7 +8,9 @@ from core.diagnostic_request import SECURITY_SEED_REQUESTS
 
 from html import escape
 
-from PySide6.QtCore import Qt, QSignalBlocker, Signal
+from pathlib import Path
+
+from PySide6.QtCore import Qt, QSignalBlocker, Signal, QTimer
 
 from PySide6.QtGui import QColor, QFontDatabase, QKeySequence, QShortcut
 
@@ -16,8 +18,13 @@ from PySide6.QtWidgets import (
 
     QApplication, QHBoxLayout, QHeaderView, QSizePolicy, QWidget,
 
-    QLineEdit, QStyledItemDelegate, QTableWidget
+    QLineEdit, QStyledItemDelegate, QTableWidget, QFileDialog, QMessageBox
 
+)
+from core.services.can_diagnostic_report_service import (
+    CanDiagnosticReportService,
+    CanDiagnosticReportSheet,
+    CanDiagnosticReportStep,
 )
 from gui.themes.theme_manager import ThemeManager
 
@@ -358,6 +365,8 @@ class CanDiagnosticTablePanel(DiagnosticSequenceTable):
 
     vehicle_resources_changed=Signal()
 
+    sequence_stop_requested = Signal()
+
     COL_CHECK, COL_STEP, COL_SEQUENCE_NAME, COL_ECU, COL_REQUEST, COL_SEND, COL_DELAY, COL_REPEAT, COL_EXPECTED, COL_RECEIVE, COL_RESULT, COL_COMMENT = range(12)
 
     HEADERS = ("✓", "Step", "Test sequence name", "ECU", "Payload (HEX)", ">", "Delay (ms)", "Repeat",
@@ -384,7 +393,19 @@ class CanDiagnosticTablePanel(DiagnosticSequenceTable):
 
         self.import_diagnostics = ()
 
+        self._is_sequence_running = False
+        self._sequence_run_index = -1
+        self._step_repeat_counter = 0
+        self._sequence_current_loop = 1
+        self._sequence_target_loops = 1
+        self._sequences_export_provider = None
+        self._report_service = CanDiagnosticReportService()
+
         super().__init__(parent, vehicle_service)
+
+        self._sequence_run_timer = QTimer(self)
+        self._sequence_run_timer.setSingleShot(True)
+        self._sequence_run_timer.timeout.connect(self._run_next_step)
 
     def _setup_ui(self):
 
@@ -410,6 +431,8 @@ class CanDiagnosticTablePanel(DiagnosticSequenceTable):
 
         self.title.setMinimumWidth(60)
 
+        self.title.hide()
+
         self.notice = PrimaryLabel("")
 
         self.notice.setTextFormat(Qt.PlainText)
@@ -426,29 +449,38 @@ class CanDiagnosticTablePanel(DiagnosticSequenceTable):
 
         self.btn_load.hide()
 
-        self.btn_settings = ActionButton("Settings", width=72, height=30)
+        self.btn_settings = ActionButton("Setting", width=72, height=30)
 
         self.btn_settings.setCheckable(True)
 
         self.btn_settings.toggled.connect(self.execution_settings.setVisible)
 
-        self.btn_add.setText("Add Row")
+        self.btn_add.setText("+Add Row")
+        self.btn_add.setFixedHeight(30)
+        self.btn_add.setMinimumWidth(80)
 
-        self.btn_export.setText("Save")
+        self.btn_delete.setFixedHeight(30)
 
-        self.btn_export.hide()  # Compatibility signal remains; visible Save belongs to sidebar.
+        self.btn_run.setText("RUN")
+        self.btn_run.setFixedWidth(200)
+        self.btn_run.setFixedHeight(30)
+        self.btn_run.setEnabled(True)
+        self.btn_run.show()
+        self.btn_run.setToolTip("Run sequence from top to bottom")
 
-        self.btn_run.setText("Run Selected")
+        self.btn_export.setText("EXPORT")
+        self.btn_export.setFixedWidth(200)
+        self.btn_export.setFixedHeight(30)
+        self.btn_export.setEnabled(True)
+        self.btn_export.show()
+        self.btn_export.setToolTip("Export checked sequences to Excel")
 
-        self.btn_run.setEnabled(False)
-
+        self.btn_stop.setText("STOP")
+        self.btn_stop.setFixedWidth(200)
+        self.btn_stop.setFixedHeight(30)
         self.btn_stop.setEnabled(False)
-
-        self.btn_run.setToolTip("Automatic sequence execution is not enabled in M04.")
-
-        self.btn_stop.setToolTip(self.btn_run.toolTip())
-
-        self.btn_stop.hide()
+        self.btn_stop.show()
+        self.btn_stop.setToolTip("Stop sequence execution")
 
         self.vehicle_selector.setMaximumWidth(210)
 
@@ -460,15 +492,14 @@ class CanDiagnosticTablePanel(DiagnosticSequenceTable):
 
         toolbar.setSpacing(6)
 
-        toolbar.addWidget(self.title, 1)
-
         toolbar.addWidget(self.vehicle_selector)
-
-        for button in (self.btn_add, self.btn_delete, self.btn_load, self.btn_export, self.btn_run, self.btn_settings):
-
-            button.setMinimumSize(button.minimumWidth() if button not in (self.btn_add, self.btn_export) else 66, 30)
-
-            toolbar.addWidget(button)
+        toolbar.addWidget(self.btn_add)
+        toolbar.addWidget(self.btn_delete)
+        toolbar.addWidget(self.btn_run)
+        toolbar.addWidget(self.btn_export)
+        toolbar.addWidget(self.btn_stop)
+        toolbar.addWidget(self.btn_settings)
+        toolbar.addStretch(1)
 
         layout.insertLayout(0, toolbar)
 
@@ -480,7 +511,11 @@ class CanDiagnosticTablePanel(DiagnosticSequenceTable):
 
         self.btn_load.clicked.connect(self.load_requested)
 
-        self.btn_export.clicked.connect(self.save_requested)
+        self.btn_run.clicked.connect(self.run_sequence)
+
+        self.btn_stop.clicked.connect(self.stop_sequence)
+
+        self.btn_export.clicked.connect(self.export_diagnostic_report)
 
         self.table.currentCellChanged.connect(self._selection_changed)
         self.table.itemSelectionChanged.connect(
@@ -518,6 +553,9 @@ class CanDiagnosticTablePanel(DiagnosticSequenceTable):
 
     def fn_load_sequence(self, test_case):
 
+        if self._is_sequence_running:
+            self.stop_sequence()
+
         self._auto_comments.clear()
 
         self.step_ids = [uuid4().hex for _ in test_case.steps] if test_case else []
@@ -536,6 +574,9 @@ class CanDiagnosticTablePanel(DiagnosticSequenceTable):
 
         self.title.setToolTip(self.title.text())
 
+        self.btn_run.setEnabled(bool(test_case and test_case.steps))
+        self.btn_stop.setEnabled(False)
+
         self.notice.clear()
 
         self.notice.hide()
@@ -552,11 +593,16 @@ class CanDiagnosticTablePanel(DiagnosticSequenceTable):
 
     def fn_add_step_after_selected(self):
 
+        if self._is_sequence_running:
+            self.stop_sequence("Sequence execution stopped: step added.")
+
         self._ensure_test_case()
 
         self.step_ids.insert(self._selected_insert_index(), uuid4().hex)
 
         super().fn_add_step_after_selected()
+
+        self.btn_run.setEnabled(bool(self.step_ids))
 
     def _replace_steps(self, steps):
 
@@ -565,6 +611,9 @@ class CanDiagnosticTablePanel(DiagnosticSequenceTable):
         super()._replace_steps(steps)
 
     def fn_remove_selected_step(self):
+
+        if self._is_sequence_running:
+            self.stop_sequence("Sequence execution stopped: step removed.")
 
         removed = set(self._selected_rows())
 
@@ -579,6 +628,8 @@ class CanDiagnosticTablePanel(DiagnosticSequenceTable):
         self.step_ids = ids
 
         super().fn_remove_selected_step()
+
+        self.btn_run.setEnabled(bool(self.step_ids))
 
         self.selected_rows_changed.emit(self.checked_step_ids())
 
@@ -772,29 +823,33 @@ class CanDiagnosticTablePanel(DiagnosticSequenceTable):
 
             if not req_valid or not step.request.strip():
 
-                self.show_notice(f"Cannot send: {req_warn or 'Invalid or empty HEX payload.'}"); return
+                self.show_notice(f"Cannot send: {req_warn or 'Invalid or empty HEX payload.'}"); return False
 
             exp_valid, exp_fmt, exp_warn = validate_and_format_hex(step.expected_response)
 
             if not exp_valid and step.expected_response.strip():
 
-                self.show_notice(f"Cannot send: {exp_warn}"); return
+                self.show_notice(f"Cannot send: {exp_warn}"); return False
 
             payload = self._request_payload(step.request)
 
             if payload is None:
 
-                self.show_notice('Invalid or empty HEX payload.'); return
+                self.show_notice('Invalid or empty HEX payload.'); return False
 
             if payload[0] == 0x27 and payload not in SECURITY_SEED_REQUESTS:
 
-                self.show_notice('Security Access permits only exact 27 01 requestSeed; key submission is not enabled.'); return
+                self.show_notice('Security Access permits only exact 27 01 requestSeed; key submission is not enabled.'); return False
 
             if not self._resolved_ecu(step.ecu):
 
-                self.show_notice('Select Vehicle and a configured ECU before sending.'); return
+                self.show_notice('Select Vehicle and a configured ECU before sending.'); return False
 
-            if not self._request_busy and self._send_available: self.row_send_requested.emit(key)
+            if not self._request_busy and self._send_available:
+                self.row_send_requested.emit(key)
+                return True
+
+        return False
 
     def set_request_busy(self,busy):
 
@@ -805,6 +860,12 @@ class CanDiagnosticTablePanel(DiagnosticSequenceTable):
     def set_send_available(self,available):
 
         self._send_available=bool(available)
+
+        if not self._send_available and self._is_sequence_running:
+            self.stop_sequence("Sequence execution stopped: CAN channel not available.")
+
+        if not self._is_sequence_running:
+            self.btn_run.setEnabled(bool(self.step_ids))
 
         for row in range(self.table.rowCount()): self._set_button_state(row)
 
@@ -958,6 +1019,10 @@ class CanDiagnosticTablePanel(DiagnosticSequenceTable):
 
             self._render_runtime(self.step_ids.index(key))
 
+        if self._is_sequence_running and outcome != "Running":
+            if 0 <= self._sequence_run_index < len(self.step_ids) and self.step_ids[self._sequence_run_index] == key:
+                self._schedule_next_step()
+
         return True
 
     def _render_runtime(self, row):
@@ -1022,6 +1087,238 @@ class CanDiagnosticTablePanel(DiagnosticSequenceTable):
             for row in range(self.table.rowCount()):
 
                 self._render_runtime(row)
+
+    def run_sequence(self):
+        if self._is_sequence_running:
+            return
+        if not self.step_ids:
+            self.show_notice("No steps in the sequence to run.")
+            return
+        if not self._send_available:
+            self.show_notice("Connect Vector first.")
+            return
+        self._is_sequence_running = True
+        self._sequence_run_index = 0
+        self._step_repeat_counter = 0
+        self._sequence_current_loop = 1
+        self._sequence_target_loops = self.spn_loop.value() if hasattr(self, "spn_loop") else 1
+        self.btn_run.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self._execute_step_at_index(0)
+
+    def stop_sequence(self, notice: str = "Sequence execution stopped."):
+        self._is_sequence_running = False
+        self._sequence_run_timer.stop()
+        self.btn_run.setEnabled(bool(self.step_ids))
+        self.btn_stop.setEnabled(False)
+        self.sequence_stop_requested.emit()
+        if notice:
+            self.show_notice(notice)
+
+    def _execute_step_at_index(self, index: int):
+        if not self._is_sequence_running:
+            return
+        if index >= len(self.step_ids):
+            self.stop_sequence("Sequence execution completed.")
+            return
+        key = self.step_ids[index]
+        self._select_row(index)
+        sent = self._request_step(key)
+        if not sent:
+            if not self._send_available:
+                self.stop_sequence("Sequence execution stopped: CAN channel not available.")
+            else:
+                self.set_step_result(key, "", "Error", "Cannot send request")
+
+    def _schedule_next_step(self):
+        if not self._is_sequence_running:
+            return
+
+        delay_ms = 100
+        repeat = 1
+        if 0 <= self._sequence_run_index < len(self.step_ids) and self._test_case is not None:
+            if self._sequence_run_index < len(self._test_case.steps):
+                step = self._test_case.steps[self._sequence_run_index]
+                repeat = max(1, step.repeat)
+                if step.delay_ms is not None and step.delay_ms >= 0:
+                    delay_ms = step.delay_ms
+                elif hasattr(self, "spn_command_delay"):
+                    delay_ms = self.spn_command_delay.value()
+
+        if self._step_repeat_counter + 1 < repeat:
+            self._step_repeat_counter += 1
+            self._sequence_run_timer.start(delay_ms)
+            return
+
+        self._step_repeat_counter = 0
+        self._sequence_run_index += 1
+
+        if self._sequence_run_index >= len(self.step_ids):
+            if self._sequence_current_loop < self._sequence_target_loops:
+                self._sequence_current_loop += 1
+                self._sequence_run_index = 0
+                self._sequence_run_timer.start(delay_ms)
+                return
+            self.stop_sequence("Sequence execution completed.")
+            return
+
+        self._sequence_run_timer.start(delay_ms)
+
+    def _run_next_step(self):
+        if not self._is_sequence_running:
+            return
+        if self._sequence_run_index >= len(self.step_ids):
+            self.stop_sequence("Sequence execution completed.")
+            return
+        self._execute_step_at_index(self._sequence_run_index)
+
+    def fn_set_sequences_export_provider(self, provider):
+        self._sequences_export_provider = provider
+
+    def get_export_rows(self) -> list[CanDiagnosticReportStep]:
+        rows: list[CanDiagnosticReportStep] = []
+        for row_idx in range(self.table.rowCount()):
+            step_id = self.step_ids[row_idx] if row_idx < len(self.step_ids) else ""
+            step_item = self.table.item(row_idx, self.COL_STEP)
+            step_val = step_item.text() if step_item else str(row_idx + 1)
+
+            name_item = self.table.item(row_idx, self.COL_SEQUENCE_NAME)
+            name_val = name_item.text() if name_item else ""
+
+            ecu_widget = self.table.cellWidget(row_idx, self.COL_ECU)
+            ecu_val = ecu_widget.currentText() if ecu_widget and hasattr(ecu_widget, "currentText") else ""
+
+            req_item = self.table.item(row_idx, self.COL_REQUEST)
+            req_val = req_item.text() if req_item else ""
+
+            delay_item = self.table.item(row_idx, self.COL_DELAY)
+            delay_val = delay_item.text() if delay_item else ""
+
+            repeat_item = self.table.item(row_idx, self.COL_REPEAT)
+            repeat_val = repeat_item.text() if repeat_item else "1"
+
+            exp_item = self.table.item(row_idx, self.COL_EXPECTED)
+            exp_val = exp_item.text() if exp_item else ""
+
+            recv_widget = self.table.cellWidget(row_idx, self.COL_RECEIVE)
+            recv_val = recv_widget.text() if recv_widget and hasattr(recv_widget, "text") else ""
+            if recv_val == "—":
+                recv_val = ""
+            if not recv_val and step_id in self._runtime:
+                recv_val = self._runtime[step_id][0] or ""
+
+            res_item = self.table.item(row_idx, self.COL_RESULT)
+            res_val = res_item.text() if res_item else ""
+            if (not res_val or res_val == "—") and step_id in self._runtime:
+                res_val = self._runtime[step_id][1] or ""
+
+            comment_item = self.table.item(row_idx, self.COL_COMMENT)
+            comment_val = comment_item.text() if comment_item else ""
+
+            rows.append(
+                CanDiagnosticReportStep(
+                    step=step_val,
+                    sequence_name=name_val,
+                    ecu=ecu_val,
+                    payload=req_val,
+                    delay_ms=delay_val,
+                    repeat=repeat_val,
+                    expected_response=exp_val,
+                    receive_message=recv_val,
+                    results=res_val,
+                    comment=comment_val,
+                )
+            )
+        return rows
+
+    def _build_diagnostic_report_sheets(self) -> list[CanDiagnosticReportSheet]:
+        sheets: list[CanDiagnosticReportSheet] = []
+        if self._sequences_export_provider is not None:
+            sequences_data = self._sequences_export_provider()
+        else:
+            sequences_data = []
+
+        if not sequences_data:
+            if self._test_case is not None:
+                title = self._test_case.name or "Diagnostic"
+                sheets.append(CanDiagnosticReportSheet(title=title, rows=self.get_export_rows()))
+            return sheets
+
+        for case, custom_rows in sequences_data:
+            if case is None:
+                continue
+            title = case.name or "Diagnostic"
+            if custom_rows is not None:
+                sheet_rows = list(custom_rows)
+            else:
+                sheet_rows = []
+                for step in case.steps:
+                    sheet_rows.append(
+                        CanDiagnosticReportStep(
+                            step=str(step.step),
+                            sequence_name=step.sequence_name,
+                            ecu=step.ecu,
+                            payload=step.request,
+                            delay_ms=str(step.delay_ms if step.delay_ms is not None else ""),
+                            repeat=str(step.repeat),
+                            expected_response=step.expected_response,
+                            receive_message="",
+                            results="",
+                            comment=step.comment,
+                        )
+                    )
+            sheets.append(CanDiagnosticReportSheet(title=title, rows=sheet_rows))
+        return sheets
+
+    def _choose_diagnostic_report_file(self) -> Path | None:
+        default_path = self._report_service.default_report_path()
+        output_file, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Diagnostic Report",
+            str(default_path),
+            "Excel Files (*.xlsx)",
+        )
+        if not output_file:
+            return None
+        path = Path(output_file)
+        if path.suffix.lower() != ".xlsx":
+            path = path.with_suffix(".xlsx")
+        return path
+
+    def export_diagnostic_report(self, output_file: str | Path | None = None) -> Path | None:
+        sheets = self._build_diagnostic_report_sheets()
+        if not sheets:
+            self.show_notice("No sequence data to export.")
+            return None
+
+        if output_file is None:
+            output_file = self._choose_diagnostic_report_file()
+            if output_file is None:
+                return None
+
+        try:
+            exported_path = self._report_service.export_report(
+                sheets,
+                output_file,
+            )
+        except PermissionError:
+            QMessageBox.warning(
+                self,
+                "Diagnostic Report",
+                "Cannot save Diagnostic report. Please close the Excel file and try again.",
+            )
+            return None
+        except Exception as error:
+            self.show_notice(f"Export error: {error}")
+            return None
+
+        self.show_notice(f"Diagnostic report exported: {exported_path.name}")
+        QMessageBox.information(
+            self,
+            "Diagnostic Report",
+            f"Diagnostic report saved:\n\n{exported_path}",
+        )
+        return exported_path
 
     def copy_current_cell(self):
         focus = QApplication.focusWidget()

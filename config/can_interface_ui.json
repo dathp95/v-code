@@ -135,7 +135,7 @@
         "C:\\REDO\\CODINGTOOL\\config\\diagnostic_sequences\\9733.VDKCU&WriteOEMRootCert.json",
         "C:\\REDO\\CODINGTOOL\\config\\diagnostic_sequences\\9734.VDKCU&SerDiagKeyProvision.json"
     ],
-    "selected_id": "C:\\REDO\\CODINGTOOL\\config\\diagnostic_sequences\\206.BCM&IO&R.json",
+    "selected_id": "C:\\REDO\\CODINGTOOL\\config\\diagnostic_sequences\\10.Extend_Session.json",
     "vehicles": {
         "C:\\REDO\\CODINGTOOL\\config\\diagnostic_sequences\\0002_READ_VIN copy.json": "LIMO",
         "C:\\VF5NP\\SW\\Version 3.2 CBT\\Version 3.2 CBT\\SeqList\\0001.READ&CDS.diag": "VF5NP",
