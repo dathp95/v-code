@@ -603,7 +603,7 @@ class CodingValuePanel(QGroupBox):
             self.txt_coding_preview.setExtraSelections([])
             self._has_encoded_payload = bool(self._payload_preview_bytes)
 
-            if definition_loaded:
+            if definition_loaded or self._coding_definition is not None:
                 self._restore_table_snapshot(snapshot)
 
             self.txt_parameter_filter.setText(snapshot.parameter_filter)

@@ -210,12 +210,61 @@ class EcuWorkspaceSidebarTests(unittest.TestCase):
         menu = item._create_context_menu()
         actions = [action.text() for action in menu.actions()]
 
-        self.assertEqual(actions, ["+ Add Panel", "", "Save", "", "Rename", "Delete"])
+        self.assertEqual(actions, ["+ Add Panel", "Clone panel", "", "Save", "Save Order", "", "Rename", "Delete"])
         self.assertEqual(
             [action.data() for action in menu.actions()],
-            ["add_panel", None, "save", None, "rename", "delete"],
+            ["add_panel", "clone_panel", None, "save", "save_order", None, "rename", "delete"],
         )
+        self.assertFalse(menu.actions()[4].isEnabled())
         menu.deleteLater()
+
+    def test_save_order_in_context_menu_reflects_dirty_state_and_emits(self):
+        sidebar = EcuWorkspaceSidebar()
+        self.addCleanup(sidebar.deleteLater)
+        mhu = CodingEcuWorkspace.create("MHU")
+        vcu = CodingEcuWorkspace.create("VCU")
+        sidebar.add_workspace(mhu)
+        sidebar.add_workspace(vcu)
+
+        item = sidebar._item_by_id[mhu.id]
+
+        # Initial clean state: btn_save_order and menu action both say "Save Order" and are disabled
+        self.assertFalse(sidebar.order_is_dirty())
+        self.assertEqual(sidebar.btn_save_order.text(), "Save Order")
+        self.assertFalse(sidebar.btn_save_order.isEnabled())
+
+        menu = item._create_context_menu()
+        save_order_action = menu.actions()[4]
+        self.assertEqual(save_order_action.text(), "Save Order")
+        self.assertFalse(save_order_action.isEnabled())
+        menu.deleteLater()
+
+        # Simulate order changed (reorder)
+        sidebar._workspaces = [vcu, mhu]
+        sidebar._refresh_order_state()
+
+        # Dirty state: btn_save_order and menu action both say "Save Order *" and are enabled
+        self.assertTrue(sidebar.order_is_dirty())
+        self.assertEqual(sidebar.btn_save_order.text(), "Save Order *")
+        self.assertTrue(sidebar.btn_save_order.isEnabled())
+
+        menu_dirty = item._create_context_menu()
+        save_order_action_dirty = menu_dirty.actions()[4]
+        self.assertEqual(save_order_action_dirty.text(), "Save Order *")
+        self.assertTrue(save_order_action_dirty.isEnabled())
+
+        # Trigger Save Order via context menu action
+        emitted = []
+        sidebar.order_save_requested.connect(lambda: emitted.append(True))
+        item._handle_context_action(save_order_action_dirty)
+        self.assertEqual(emitted, [True])
+        menu_dirty.deleteLater()
+
+        # Mark saved
+        sidebar.mark_order_saved()
+        self.assertFalse(sidebar.order_is_dirty())
+        self.assertEqual(sidebar.btn_save_order.text(), "Save Order")
+        self.assertFalse(sidebar.btn_save_order.isEnabled())
 
     def test_workspace_context_menu_add_panel_uses_sidebar_add_workflow(self):
         sidebar = EcuWorkspaceSidebar()
@@ -235,6 +284,66 @@ class EcuWorkspaceSidebarTests(unittest.TestCase):
 
         self.assertEqual(called, [True])
         menu.deleteLater()
+
+    def test_workspace_context_menu_clone_panel_triggers_dialog_and_clones(self):
+        sidebar = EcuWorkspaceSidebar()
+        self.addCleanup(sidebar.deleteLater)
+        workspace = CodingEcuWorkspace.create("MHU", coding_file="configs/mhu.json")
+        sidebar.add_workspace(workspace)
+        item = sidebar._item_by_id[workspace.id]
+
+        menu = item._create_context_menu()
+        action_clone = menu.actions()[1]
+        self.assertEqual(action_clone.text(), "Clone panel")
+
+        cloned_events = []
+        sidebar.workspace_cloned.connect(lambda src, cl: cloned_events.append((src, cl)))
+
+        with patch(
+            "gui.widgets.coding_value.ecu_workspace_sidebar.QInputDialog.getText",
+            return_value=("MHU Copy", True),
+        ):
+            item._handle_context_action(action_clone)
+
+        self.assertEqual(sidebar.workspace_count(), 2)
+        cloned_ws = sidebar.workspaces()[1]
+        self.assertEqual(cloned_ws.name, "MHU Copy")
+        self.assertEqual(cloned_ws.coding_file, "configs/mhu.json")
+        self.assertNotEqual(cloned_ws.id, workspace.id)
+        self.assertEqual(sidebar.active_workspace_id(), cloned_ws.id)
+        self.assertEqual(len(cloned_events), 1)
+        self.assertEqual(cloned_events[0][0], workspace.id)
+        self.assertEqual(cloned_events[0][1].id, cloned_ws.id)
+        menu.deleteLater()
+
+    def test_generate_clone_name_handles_unique_and_incrementing_names(self):
+        sidebar = EcuWorkspaceSidebar()
+        self.addCleanup(sidebar.deleteLater)
+        self.assertEqual(sidebar._generate_clone_name("MHU"), "MHU (Clone)")
+
+        sidebar.add_workspace(CodingEcuWorkspace.create("MHU"))
+        self.assertEqual(sidebar._generate_clone_name("MHU"), "MHU (Clone)")
+
+        sidebar.add_workspace(CodingEcuWorkspace.create("MHU (Clone)"))
+        self.assertEqual(sidebar._generate_clone_name("MHU"), "MHU (Clone 2)")
+        self.assertEqual(sidebar._generate_clone_name("MHU (Clone)"), "MHU (Clone 2)")
+
+        sidebar.add_workspace(CodingEcuWorkspace.create("MHU (Clone 2)"))
+        self.assertEqual(sidebar._generate_clone_name("MHU"), "MHU (Clone 3)")
+        self.assertEqual(sidebar._generate_clone_name("MHU (Clone 2)"), "MHU (Clone 3)")
+
+    def test_clone_workspace_programmatic_api(self):
+        sidebar = EcuWorkspaceSidebar()
+        self.addCleanup(sidebar.deleteLater)
+        source = CodingEcuWorkspace.create("VCU", coding_file="vcu.json")
+        sidebar.add_workspace(source, select=True)
+
+        cloned = sidebar.clone_workspace(source.id, "VCU Secondary", select=True)
+        self.assertIsNotNone(cloned)
+        self.assertEqual(cloned.name, "VCU Secondary")
+        self.assertEqual(cloned.coding_file, "vcu.json")
+        self.assertEqual(sidebar.workspace_count(), 2)
+        self.assertEqual(sidebar.active_workspace_id(), cloned.id)
 
     def test_empty_space_context_menu_exposes_only_add_panel(self):
         sidebar = EcuWorkspaceSidebar()

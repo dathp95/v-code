@@ -3098,5 +3098,83 @@ class CodingValueTabTests(unittest.TestCase):
         self.assertIs(panel_a._coding_definition, replacement_definition_a)
         self.assertEqual(panel_a.table.item(0, 0).text(), "Replacement A Byte 0")
         assert_panel_b_unchanged()
+    def test_clone_workspace_panel_duplicates_snapshot_and_isolates_changes(self):
+        store = self.create_workspace_store()
+        tab = CodingValueTab(workspace_store=store)
+        self.addCleanup(tab.deleteLater)
+
+        def make_row(name, byte_pos):
+            return CodingValueRow(
+                parameter=name,
+                byte_pos=str(byte_pos),
+                bit_pos="0",
+                bit_length="8",
+                raw_value="",
+                decoded_value="",
+                decoded_options=(CodingValueOption("00", "Zero"), CodingValueOption("AA", "Set")),
+            )
+
+        definition = CodingDefinition(
+            name="VCU",
+            rows=(make_row("Byte 0", 0), make_row("Byte 1", 1)),
+        )
+
+        source_panel = tab.active_coding_value_panel()
+        self.assertIsNotNone(source_panel)
+        source_panel._set_coding_definition(definition)
+        source_panel.txt_coding_value.setPlainText("AA BB")
+        source_panel.encode_coding_payload()
+        source_panel.txt_parameter_filter.setText("Byte 0")
+        source_panel.txt_working_log.setPlainText("Initial test log")
+
+        source_ws_id = tab.workspace_sidebar.active_workspace_id()
+
+        cloned_ws = tab.workspace_sidebar.clone_workspace(source_ws_id, "VCU (Clone)", select=True)
+        self.assertIsNotNone(cloned_ws)
+        self.assertEqual(tab.workspace_sidebar.active_workspace_id(), cloned_ws.id)
+
+        cloned_panel = tab.active_coding_value_panel()
+        self.assertIsNotNone(cloned_panel)
+        self.assertIsNot(cloned_panel, source_panel)
+
+        self.assertEqual(cloned_panel.txt_coding_value.toPlainText(), "AA BB")
+        self.assertEqual(cloned_panel.txt_coding_preview.toPlainText(), "AA BB")
+        self.assertEqual(cloned_panel._payload_baseline_bytes, [0xAA, 0xBB])
+        self.assertEqual(cloned_panel.txt_parameter_filter.text(), "Byte 0")
+        self.assertEqual(cloned_panel.txt_working_log.toPlainText(), "Initial test log")
+        self.assertEqual(cloned_panel.table.item(0, 4).text(), "AA")
+        self.assertEqual(cloned_panel.table.item(1, 4).text(), "BB")
+
+        cloned_panel.table.fn_set_raw_value_at_row(0, "00")
+        self.assertEqual(cloned_panel.table.item(0, 4).text(), "00")
+        self.assertEqual(source_panel.table.item(0, 4).text(), "AA")
+
+        cloned_panel.txt_working_log.setPlainText("Modified cloned log")
+        self.assertEqual(source_panel.txt_working_log.toPlainText(), "Initial test log")
+
+    def test_clone_workspace_panel_persists_state_and_restores_cleanly(self):
+        store = self.create_workspace_store()
+        tab = CodingValueTab(workspace_store=store)
+        self.addCleanup(tab.deleteLater)
+
+        source_ws_id = tab.workspace_sidebar.active_workspace_id()
+        source_panel = tab.active_coding_value_panel()
+        source_panel.txt_coding_value.setPlainText("11 22 33")
+        source_panel.txt_working_log.setPlainText("Persist test")
+
+        cloned_ws = tab.workspace_sidebar.clone_workspace(source_ws_id, "Cloned Panel", select=True)
+        self.assertIsNotNone(cloned_ws)
+
+        cloned_snapshot = store.load_snapshot(cloned_ws.id)
+        self.assertIsNotNone(cloned_snapshot)
+        self.assertEqual(cloned_snapshot.payload_input, "11 22 33")
+        self.assertEqual(cloned_snapshot.working_log, "Persist test")
+
+        tab2 = CodingValueTab(workspace_store=store)
+        self.addCleanup(tab2.deleteLater)
+        self.assertEqual(tab2.workspace_sidebar.workspace_count(), 2)
+        cloned_tab2_panel = tab2._panel_by_workspace_id.get(cloned_ws.id)
+        self.assertIsNotNone(cloned_tab2_panel)
+
 if __name__ == "__main__":
     unittest.main()

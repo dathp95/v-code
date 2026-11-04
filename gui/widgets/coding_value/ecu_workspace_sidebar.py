@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from PySide6.QtCore import QMimeData, Qt, Signal, QTimer
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -37,13 +39,16 @@ class WorkspaceReorderArea(ReorderableFilterArea):
 class EcuWorkspaceItemWidget(QuickAccessButton):
 
     add_panel_requested = Signal()
+    clone_requested = Signal(str)
     workspace_clicked = Signal(str)
     save_requested = Signal(str)
+    order_save_requested = Signal()
     delete_requested = Signal(str)
     rename_requested = Signal(str)
 
-    def __init__(self, workspace: CodingEcuWorkspace, parent=None):
+    def __init__(self, workspace: CodingEcuWorkspace, sidebar=None, parent=None):
         self.workspace = workspace
+        self.sidebar = sidebar
         self._active = False
         self._dirty = False
         super().__init__(workspace.name, height=26, parent=parent, )
@@ -86,14 +91,31 @@ class EcuWorkspaceItemWidget(QuickAccessButton):
         self._handle_context_action(action)
         menu.deleteLater()
 
+    def _is_order_dirty(self) -> bool:
+        if self.sidebar is not None and hasattr(self.sidebar, "order_is_dirty"):
+            return self.sidebar.order_is_dirty()
+        parent = self.parent()
+        while parent is not None:
+            if hasattr(parent, "order_is_dirty"):
+                return parent.order_is_dirty()
+            parent = parent.parent()
+        return False
+
     def _create_context_menu(self):
         menu = QMenu(self)
         fn_apply_menu_style(menu)
         action_add = menu.addAction("+ Add Panel")
         action_add.setData("add_panel")
+        action_clone = menu.addAction("Clone panel")
+        action_clone.setData("clone_panel")
         menu.addSeparator()
         action_save = menu.addAction("Save")
         action_save.setData("save")
+        is_order_dirty = self._is_order_dirty()
+        save_order_text = "Save Order *" if is_order_dirty else "Save Order"
+        action_save_order = menu.addAction(save_order_text)
+        action_save_order.setData("save_order")
+        action_save_order.setEnabled(is_order_dirty)
         menu.addSeparator()
         action_rename = menu.addAction("Rename")
         action_rename.setData("rename")
@@ -108,8 +130,12 @@ class EcuWorkspaceItemWidget(QuickAccessButton):
         action_id = action.data()
         if action_id == "add_panel":
             self.add_panel_requested.emit()
+        elif action_id == "clone_panel":
+            self.clone_requested.emit(self.workspace.id)
         elif action_id == "save":
             self.save_requested.emit(self.workspace.id)
+        elif action_id == "save_order":
+            self.order_save_requested.emit()
         elif action_id == "rename":
             self.rename_requested.emit(self.workspace.id)
         elif action_id == "delete":
@@ -139,6 +165,7 @@ class EcuWorkspaceItemWidget(QuickAccessButton):
 class EcuWorkspaceSidebar(QWidget):
 
     workspace_added = Signal(object)
+    workspace_cloned = Signal(str, object)
     workspace_selected = Signal(str)
     workspace_save_requested = Signal(str)
     workspace_renamed = Signal(str, str)
@@ -267,9 +294,13 @@ class EcuWorkspaceSidebar(QWidget):
         self._workspaces = [button.workspace for button in buttons]
         self._refresh_order_state()
 
+    def order_is_dirty(self) -> bool:
+        return [workspace.id for workspace in self._workspaces] != self._saved_order
+
     def _refresh_order_state(self):
-        dirty = [workspace.id for workspace in self._workspaces] != self._saved_order
+        dirty = self.order_is_dirty()
         self.btn_save_order.setEnabled(dirty)
+        self.btn_save_order.setText("Save Order *" if dirty else "Save Order")
         self._feedback_timer.stop()
         self.lbl_order_status.setText("Order not saved." if dirty else "")
         self.lbl_order_status.setVisible(dirty)
@@ -307,11 +338,13 @@ class EcuWorkspaceSidebar(QWidget):
 
         self._workspaces.append(workspace)
         self._saved_order.append(workspace.id)
-        item = EcuWorkspaceItemWidget(workspace)
+        item = EcuWorkspaceItemWidget(workspace, sidebar=self)
 
         item.add_panel_requested.connect(self._add_workspace_from_dialog)
+        item.clone_requested.connect(self._clone_workspace_from_dialog)
         item.workspace_clicked.connect(self.select_workspace)
         item.save_requested.connect(self.workspace_save_requested)
+        item.order_save_requested.connect(self.order_save_requested)
         item.delete_requested.connect(self.remove_workspace)
         item.rename_requested.connect(self._rename_workspace_from_dialog)
         self._item_by_id[workspace.id] = item
@@ -476,6 +509,77 @@ class EcuWorkspaceSidebar(QWidget):
         action_add = menu.addAction("+ Add Panel")
         action_add.setData("add_panel")
         return menu
+
+    def _generate_clone_name(self, base_name: str) -> str:
+        existing_names = {ws.name for ws in self._workspaces}
+        match = re.match(r"^(.*?)\s+\(Clone(?:\s+\d+)?\)$", base_name)
+        root_name = match.group(1) if match else base_name
+
+        candidate = f"{root_name} (Clone)"
+        if candidate not in existing_names:
+            return candidate
+
+        index = 2
+        while f"{root_name} (Clone {index})" in existing_names:
+            index += 1
+        return f"{root_name} (Clone {index})"
+
+    def _clone_workspace_from_dialog(self, source_workspace_id: str):
+        source_workspace = self.workspace_by_id(source_workspace_id)
+        if source_workspace is None:
+            return
+
+        suggested_name = self._generate_clone_name(source_workspace.name)
+        name, accepted = QInputDialog.getText(
+            self,
+            "Clone Panel",
+            "Panel name:",
+            text=suggested_name,
+        )
+        if not accepted:
+            return
+
+        name = str(name or "").strip()
+        if not name:
+            QMessageBox.warning(
+                self,
+                "Clone Panel",
+                "Please enter a panel name.",
+            )
+            return
+
+        self.clone_workspace(source_workspace_id, name, select=True)
+
+    def clone_workspace(
+            self,
+            source_workspace_id: str,
+            new_name: str,
+            select: bool = True,
+        ) -> CodingEcuWorkspace | None:
+        source_workspace = self.workspace_by_id(source_workspace_id)
+        if source_workspace is None:
+            return None
+
+        try:
+            cloned_workspace = CodingEcuWorkspace.create(
+                new_name,
+                coding_file=source_workspace.coding_file,
+            )
+        except ValueError:
+            return None
+
+        if not self.add_workspace(cloned_workspace, select=False):
+            return None
+
+        self.workspace_cloned.emit(source_workspace_id, cloned_workspace)
+        if select:
+            self.select_workspace(cloned_workspace.id)
+
+        QTimer.singleShot(
+            50,
+            self._scroll_to_bottom,
+        )
+        return cloned_workspace
 
     def _save_active_workspace(self):
         active_workspace_id = self.active_workspace_id()

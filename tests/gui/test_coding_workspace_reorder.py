@@ -196,7 +196,7 @@ class CodingWorkspaceReorderTests(unittest.TestCase):
         item = self.sidebar._item_widgets()[0]
         menu = item._create_context_menu()
         self.assertEqual([a.data() for a in menu.actions()],
-                         ["add_panel", None, "save", None, "rename", "delete"])
+                         ["add_panel", "clone_panel", None, "save", "save_order", None, "rename", "delete"])
         menu.deleteLater()
         QTest.mouseClick(item, Qt.LeftButton)
         self.assertEqual(self.sidebar.active_workspace_id(), item.workspace.id)

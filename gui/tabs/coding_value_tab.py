@@ -40,6 +40,7 @@ class CodingValueTab(QWidget):
         self.workspace_sidebar = EcuWorkspaceSidebar()
         self.workspace_stack = QStackedWidget()
         self.workspace_sidebar.workspace_added.connect(self._add_workspace_panel)
+        self.workspace_sidebar.workspace_cloned.connect(self._clone_workspace_panel)
         self.workspace_sidebar.workspace_selected.connect(self._select_workspace_panel)
         self.workspace_sidebar.workspace_save_requested.connect(
             self._save_workspace_snapshot
@@ -98,6 +99,59 @@ class CodingValueTab(QWidget):
                 self._workspace_store.path_for_use(workspace.coding_file),
                 emit_coding_file_changed=False,
             )
+        self._save_workspace_state()
+
+    def _clone_workspace_panel(
+            self,
+            source_workspace_id: str,
+            cloned_workspace: CodingEcuWorkspace,
+        ):
+        if cloned_workspace.id in self._panel_by_workspace_id:
+            return
+
+        source_panel = self._panel_by_workspace_id.get(source_workspace_id)
+        snapshot = None
+        if source_panel is not None:
+            snapshot = source_panel.create_workspace_snapshot()
+        else:
+            snapshot = self._workspace_store.load_snapshot(source_workspace_id)
+
+        panel = CodingValuePanel()
+        panel.coding_file_changed.connect(
+            lambda coding_file, workspace_id=cloned_workspace.id:
+                self._on_workspace_coding_file_changed(workspace_id, coding_file)
+        )
+        panel.state_changed.connect(
+            lambda workspace_id=cloned_workspace.id:
+                self._on_panel_state_changed(workspace_id)
+        )
+        self._panel_by_workspace_id[cloned_workspace.id] = panel
+        self.workspace_stack.addWidget(panel)
+
+        if source_panel is not None and getattr(source_panel, "_coding_definition", None) is not None:
+            panel._set_coding_definition(source_panel._coding_definition)
+
+        if snapshot is not None:
+            panel.restore_workspace_snapshot(
+                replace(
+                    snapshot,
+                    coding_file=self._workspace_store.path_for_use(
+                        snapshot.coding_file
+                    ),
+                )
+            )
+            cloned_workspace.set_coding_file(snapshot.coding_file)
+            try:
+                self._workspace_store.save_snapshot(cloned_workspace.id, snapshot)
+                self.workspace_sidebar.set_workspace_dirty(cloned_workspace.id, False)
+            except OSError:
+                self.workspace_sidebar.set_workspace_dirty(cloned_workspace.id, True)
+        elif cloned_workspace.coding_file:
+            panel.load_coding_definition_file(
+                self._workspace_store.path_for_use(cloned_workspace.coding_file),
+                emit_coding_file_changed=False,
+            )
+
         self._save_workspace_state()
 
     def _remove_workspace_panel(self, workspace_id: str):
